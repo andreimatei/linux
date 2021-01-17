@@ -2426,7 +2426,7 @@ static void mark_reg_stack_read(struct bpf_verifier_env *env,
 			break;
 		zeros++;
 	}
-	if (zeros == (max_off - min_off)) {
+	if (zeros == max_off - min_off) {
 		/* any access_size read into register is zero extended,
 		 * so the whole register == const_zero
 		 */
@@ -2515,6 +2515,7 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 		mark_reg_read(env, reg, reg->parent, REG_LIVE_READ64);
 	} else {
 		u8 type;
+
 		for (i = 0; i < size; i++) {
 			type = stype[(slot - i) % BPF_REG_SIZE];
 			if (type == STACK_MISC)
@@ -2534,7 +2535,7 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 
 enum stack_access_type {
 	ACCESS_DIRECT,  /* the access is performed by an instruction */
-	ACCESS_HELPER,  /* the access is performed by a helper*/
+	ACCESS_HELPER,  /* the access is performed by a helper */
 };
 
 static int check_stack_boundary(struct bpf_verifier_env *env, int regno,
@@ -2590,9 +2591,11 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 }
 
 
-// check that stack access falls within stack limits and that 'reg' doesn't
-// have a variable offset.
-// 'off' includes 'reg->off'.
+/* check that stack access falls within stack limits and that 'reg' doesn't
+ * have a variable offset.
+ *
+ * 'off' includes 'reg->off'.
+ */
 static int check_fixed_stack_access(struct bpf_verifier_env *env,
 				    const struct bpf_reg_state *reg,
 				    int off, int size)
@@ -3604,13 +3607,16 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		}
 
 	} else if (reg->type == PTR_TO_STACK) {
-		if ((t == BPF_WRITE)
-				/* fixed offset stack reads track reg fills */
+		/* Check the stack access. For some access types we require the read offset
+		 * to be static; for others we allow the offset to be dynamic. The offset
+		 * is required to be static reads don't go to a register, in order to
+		 * not leak pointers (see check_stack_read_fixed_off).
+		 *
+		 * If the offset is static, we go through the static check path
+		 * anyway, because that path tracks register fills.
+		 */
+		if (t == BPF_WRITE
 				|| tnum_is_const(reg->var_off)
-				/* reads that don't go to a register need extra checks about
-				 * what's being read in order to not leak pointers (see
-				 * check_stack_read_fixed_off)
-				 */
 				|| (value_regno < 0)) {
 			off += reg->var_off.value;
 			err = check_fixed_stack_access(env, reg, off, size);
