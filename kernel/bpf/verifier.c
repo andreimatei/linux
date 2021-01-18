@@ -2281,6 +2281,7 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 	u32 dst_reg = env->prog->insnsi[insn_idx].dst_reg;
 	struct bpf_reg_state *reg = NULL;
 
+	verbose(env, "!!! realloc: %d\n", round_up(slot + 1, BPF_REG_SIZE));
 	err = realloc_func_state(state, round_up(slot + 1, BPF_REG_SIZE),
 				 state->acquired_refs, true);
 	if (err)
@@ -3673,6 +3674,7 @@ static int check_ptr_to_map_access(struct bpf_verifier_env *env,
 static int check_stack_slot_within_bounds(
 		int off, struct bpf_func_state *state, enum bpf_access_type t)
 {
+
 	int min_valid_off;
 	if (t == BPF_WRITE)
 		min_valid_off = -MAX_BPF_STACK;
@@ -3702,7 +3704,7 @@ static int check_stack_access_within_bounds(
 
 	if (tnum_is_const(reg->var_off)) {
 		min_off = reg->var_off.value + off;
-		max_off = min_off + access_size;
+		max_off = min_off + access_size - 1;
 	} else {
 		if (reg->smax_value >= BPF_MAX_VAR_OFF ||
 		    reg->smax_value <= -BPF_MAX_VAR_OFF) {
@@ -3711,9 +3713,11 @@ static int check_stack_access_within_bounds(
 			return -EACCES;
 		}
 		min_off = reg->smin_value + off;
-		max_off = reg->smax_value + off + access_size;
+		max_off = reg->smax_value + off + access_size - 1;
 	}
 
+	verbose(env, "!!! check_stack_slot_within_bounds: off: [%d,%d] type: %d allocated: %d\n",
+			min_off, max_off, t, state->allocated_stack);
 	err = check_stack_slot_within_bounds(min_off, state, t);
 	if (err == 0)
 		err = check_stack_slot_within_bounds(max_off, state, t);
@@ -4092,7 +4096,9 @@ static int check_stack_read_access(struct bpf_verifier_env *env, int regno,
 			return err;
 	} else {
 	*/
-	if (!tnum_is_const(reg->var_off)) {
+	if (tnum_is_const(reg->var_off)) {
+		min_off = max_off = reg->var_off.value + off;
+	} else {
 		/* Variable offset is prohibited for unprivileged mode for
 		 * simplicity since it requires corresponding support in
 		 * Spectre masking for stack ALU.
@@ -4138,6 +4144,10 @@ static int check_stack_read_access(struct bpf_verifier_env *env, int regno,
 			return err;
 		}
 		*/
+
+		// !!! this is instead of all the above
+		min_off = reg->smin_value + off;
+		max_off = reg->smax_value + off;
 	}
 
 	if (meta && meta->raw_mode) {
@@ -4151,8 +4161,9 @@ static int check_stack_read_access(struct bpf_verifier_env *env, int regno,
 
 		slot = -i - 1;
 		spi = slot / BPF_REG_SIZE;
-		if (state->allocated_stack <= slot)
+		if (state->allocated_stack <= slot) {
 			goto err;
+		}
 		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
 		if (*stype == STACK_MISC)
 			goto mark;
