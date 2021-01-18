@@ -2642,11 +2642,11 @@ enum stack_access_type {
 	ACCESS_HELPER,  /* the access is performed by a helper */
 };
 
-static int check_stack_boundary(struct bpf_verifier_env *env, int regno,
-				int off,
-				int access_size, bool zero_size_allowed,
-				enum stack_access_type type,
-				struct bpf_call_arg_meta *meta);
+static int check_stack_read_access(struct bpf_verifier_env *env,
+				   int regno, int off, int access_size,
+				   bool zero_size_allowed,
+				   enum stack_access_type type,
+				   struct bpf_call_arg_meta *meta);
 
 /* Read the stack at 'ptr_regno + off' and put the result into the register
  * 'dst_regno'.
@@ -2679,12 +2679,12 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 		return -EINVAL;
 	}
 	/* Note that we pass a NULL meta, so raw access will not be permitted. Also
-	 * note that, for simplicity, check_stack_boundary is going to pretend that
+	 * note that, for simplicity, check_stack_read_access is going to pretend that
 	 * all the stack slots in range [off, off+size) will be clobbered, although
 	 * that's not the case for a stack read.
 	 */
-	err = check_stack_boundary(env, ptr_regno, off, size,
-				   false, ACCESS_DIRECT, NULL);
+	err = check_stack_read_access(env, ptr_regno, off, size,
+				      false, ACCESS_DIRECT, NULL);
 	if (err)
 		return err;
 
@@ -3690,8 +3690,8 @@ static int check_stack_slot_within_bounds(
  * 'off' includes `regno->offset`, but not its dynamic part (if any).
  */
 static int check_stack_access_within_bounds(
-		struct bpf_verifier_env *env, int regno,
-		int off, int access_size,
+		struct bpf_verifier_env *env,
+		int regno, int off, int access_size,
 		enum bpf_access_type t)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
@@ -3718,7 +3718,7 @@ static int check_stack_access_within_bounds(
 	if (err == 0)
 		err = check_stack_slot_within_bounds(max_off, state, t);
 
-	if (err != 0) {
+	if (err) {
 		if (tnum_is_const(reg->var_off)) {
 			verbose(env, "invalid stack access R%d off=%d access_size=%d\n",
 				regno, off, access_size);
@@ -3850,7 +3850,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	} else if (reg->type == PTR_TO_STACK) {
 		/* Basic bounds checks. */
 		err = check_stack_access_within_bounds(env, regno, off, size, t);
-		if (err != 0)
+		if (err)
 			return err;
 
 		state = func(env, reg);
@@ -4028,14 +4028,14 @@ static int check_atomic(struct bpf_verifier_env *env, int insn_idx, struct bpf_i
 }
 
 // !!! are calls to this still necessary, given that I've lifted some bound checks?
+/*
 static int __check_stack_boundary(struct bpf_verifier_env *env, u32 regno,
-				  int off, int access_size,
-				  bool zero_size_allowed)
+				  int off, int access_size)
 {
 	struct bpf_reg_state *reg = reg_state(env, regno);
 
 	if (off >= 0 || off < -MAX_BPF_STACK || off + access_size > 0 ||
-	    access_size < 0 || (access_size == 0 && !zero_size_allowed)) {
+	    access_size < 0) {
 		if (tnum_is_const(reg->var_off)) {
 			verbose(env, "invalid stack type R%d off=%d access_size=%d\n",
 				regno, off, access_size);
@@ -4050,35 +4050,49 @@ static int __check_stack_boundary(struct bpf_verifier_env *env, u32 regno,
 	}
 	return 0;
 }
+*/
 
 /* when register 'regno' is passed into function that will read 'access_size'
  * bytes from that pointer, make sure that it's within stack boundary
  * and all elements of stack are initialized.
  *
- * 'off' includes 'regno->off'.
+ * 'off' includes 'regno->off', but not its dynamic part (if any).
  *
  * All registers that have been spilled on the stack in the slots within the
  * read offsets are marked as read.
  */
 // !!! rename this to something about initialized, and see if I can get rid of the __check_stack_boundary
 // calls. They might still be necessary when this is called by a helper?
-static int check_stack_boundary(struct bpf_verifier_env *env, int regno,
-				int off, int access_size, bool zero_size_allowed,
-				enum stack_access_type type,
-				struct bpf_call_arg_meta *meta)
+static int check_stack_read_access(struct bpf_verifier_env *env, int regno,
+				   int off, int access_size, bool zero_size_allowed,
+				   enum stack_access_type type,
+				   struct bpf_call_arg_meta *meta)
 {
 	struct bpf_reg_state *reg = reg_state(env, regno);
 	struct bpf_func_state *state = func(env, reg);
 	int err, min_off, max_off, i, j, slot, spi;
 	char *err_extra = type == ACCESS_HELPER ? " indirect" : "";
 
+
+	if (access_size == 0 && !zero_size_allowed) {
+		verbose(env, "invalid zero-sized read");
+		return -EACCES;
+	}
+
+	err = check_stack_access_within_bounds(env, regno, off, access_size, BPF_READ);
+	if (err)
+		return err;
+
+
+	/* !!!
 	if (tnum_is_const(reg->var_off)) {
 		min_off = max_off = reg->var_off.value + off;
-		err = __check_stack_boundary(env, regno, min_off, access_size,
-					     zero_size_allowed);
+		err = __check_stack_boundary(env, regno, min_off, access_size);
 		if (err)
 			return err;
 	} else {
+	*/
+	if (!tnum_is_const(reg->var_off)) {
 		/* Variable offset is prohibited for unprivileged mode for
 		 * simplicity since it requires corresponding support in
 		 * Spectre masking for stack ALU.
@@ -4101,6 +4115,8 @@ static int check_stack_boundary(struct bpf_verifier_env *env, int regno,
 		if (meta && meta->raw_mode)
 			meta = NULL;
 
+		// !!!
+		/*
 		if (reg->smax_value >= BPF_MAX_VAR_OFF ||
 		    reg->smax_value <= -BPF_MAX_VAR_OFF) {
 			verbose(env, "R%d unbounded%s variable offset stack access\n",
@@ -4109,20 +4125,19 @@ static int check_stack_boundary(struct bpf_verifier_env *env, int regno,
 		}
 		min_off = reg->smin_value + off;
 		max_off = reg->smax_value + off;
-		err = __check_stack_boundary(env, regno, min_off, access_size,
-					     zero_size_allowed);
+		err = __check_stack_boundary(env, regno, min_off, access_size);
 		if (err) {
 			verbose(env, "R%d min value is outside of stack bound\n",
 				regno);
 			return err;
 		}
-		err = __check_stack_boundary(env, regno, max_off, access_size,
-					     zero_size_allowed);
+		err = __check_stack_boundary(env, regno, max_off, access_size);
 		if (err) {
 			verbose(env, "R%d max value is outside of stack bound\n",
 				regno);
 			return err;
 		}
+		*/
 	}
 
 	if (meta && meta->raw_mode) {
@@ -4218,8 +4233,10 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 					   "rdwr",
 					   &env->prog->aux->max_rdwr_access);
 	case PTR_TO_STACK:
-		return check_stack_boundary(env, regno, reg->off, access_size,
-			zero_size_allowed, ACCESS_HELPER, meta);
+		return check_stack_read_access(
+				env,
+				regno, reg->off, access_size,
+				zero_size_allowed, ACCESS_HELPER, meta);
 	default: /* scalar_value or invalid ptr */
 		/* Allow zero-byte read from NULL, regardless of pointer type */
 		if (zero_size_allowed && access_size == 0 &&
