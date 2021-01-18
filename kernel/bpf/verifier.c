@@ -2511,7 +2511,7 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
  */
 static void mark_reg_stack_read(struct bpf_verifier_env *env,
 				/* func where src register points to */
-				struct bpf_func_state *reg_state,
+				struct bpf_func_state *ptr_state,
 				int min_off, int max_off, int regno)
 {
 	struct bpf_verifier_state *vstate = env->cur_state;
@@ -2523,7 +2523,7 @@ static void mark_reg_stack_read(struct bpf_verifier_env *env,
 	for (i = min_off; i < max_off; i++) {
 		slot = -i - 1;
 		spi = slot / BPF_REG_SIZE;
-		stype = reg_state->stack[spi].slot_type;
+		stype = ptr_state->stack[spi].slot_type;
 		if (stype[slot % BPF_REG_SIZE] != STACK_ZERO)
 			break;
 		zeros++;
@@ -2569,7 +2569,9 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 	struct bpf_reg_state *reg;
 	u8 *stype;
 
+	// !!! still necessary? Test 178 crashes without it, but why?
 	if (reg_state->allocated_stack <= slot) {
+		verbose(env, "!!! xxx off: %d slot: %d allocated: %d state: 0x%p\n", off, slot, reg_state->allocated_stack, reg_state);
 		verbose(env, "invalid read from stack off %d+0 size %d\n",
 			off, size);
 		return -EACCES;
@@ -2649,6 +2651,11 @@ static int check_stack_read_access(struct bpf_verifier_env *env,
 				   enum stack_access_type type,
 				   struct bpf_call_arg_meta *meta);
 
+static struct bpf_reg_state *reg_state(struct bpf_verifier_env *env, int regno)
+{
+	return cur_regs(env) + regno;
+}
+
 /* Read the stack at 'ptr_regno + off' and put the result into the register
  * 'dst_regno'.
  * 'off' includes the pointer register's fixed offset(i.e. 'ptr_regno.off'),
@@ -2659,17 +2666,17 @@ static int check_stack_read_access(struct bpf_verifier_env *env,
  * filling registers (i.e. reads of spilled register cannot be detected when
  * the offset is not fixed). We conservatively mark 'dst_regno' as containing
  * SCALAR_VALUE. That's why we assert that the 'ptr_regno' has a variable
- * offset; for a fixed offset 'check_stack_read_fixed_off' should be used
+ * offset; for a fixed offset check_stack_read_fixed_off should be used
  * instead.
  */
 static int check_stack_read_var_off(struct bpf_verifier_env *env,
 				    int ptr_regno, int off, int size, int dst_regno)
 {
+	// The state of the source register.
+	struct bpf_reg_state *reg = reg_state(env, ptr_regno);
+	struct bpf_func_state *ptr_state = func(env, reg);
 	int err;
 	int min_off, max_off;
-	struct bpf_verifier_state *vstate = env->cur_state;
-	struct bpf_func_state *state = vstate->frame[vstate->curframe];
-	struct bpf_reg_state *reg = state->regs + ptr_regno;
 
 	if (tnum_is_const(reg->var_off)) {
 		char tn_buf[48];
@@ -2691,7 +2698,7 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 
 	min_off = reg->smin_value + off;
 	max_off = reg->smax_value + off;
-	mark_reg_stack_read(env, state, min_off, max_off + size, dst_regno);
+	mark_reg_stack_read(env, ptr_state, min_off, max_off + size, dst_regno);
 	return 0;
 }
 
@@ -2708,9 +2715,13 @@ static int check_stack_read(struct bpf_verifier_env *env,
 			    int ptr_regno, int off, int size,
 			    int dst_regno)
 {
+	/* !!!
 	struct bpf_verifier_state *vstate = env->cur_state;
 	struct bpf_func_state *state = vstate->frame[vstate->curframe];
 	struct bpf_reg_state *reg = state->regs + ptr_regno;
+	*/
+	struct bpf_reg_state *reg = reg_state(env, ptr_regno);
+	struct bpf_func_state *state = func(env, reg);
 	int err;
 
 	/* Some accesses are only permitted with a static offset. */
@@ -3121,11 +3132,6 @@ static int check_sock_access(struct bpf_verifier_env *env, int insn_idx,
 		regno, reg_type_str[reg->type], off, size);
 
 	return -EACCES;
-}
-
-static struct bpf_reg_state *reg_state(struct bpf_verifier_env *env, int regno)
-{
-	return cur_regs(env) + regno;
 }
 
 static bool is_pointer_value(struct bpf_verifier_env *env, int regno)
@@ -3686,21 +3692,32 @@ static int check_stack_slot_within_bounds(
 	return 0;
 }
 
-/* Check that the stack access using a particular register and offset falls within the
- * maximum stack bounds.
+/* Check that the stack access at 'regno + off' falls within the maximum stack
+ * bounds.
  *
  * 'off' includes `regno->offset`, but not its dynamic part (if any).
  */
 static int check_stack_access_within_bounds(
 		struct bpf_verifier_env *env,
 		int regno, int off, int access_size,
-		enum bpf_access_type t)
+		enum bpf_access_type t, enum stack_access_type subt)
 {
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = regs + regno;
 	struct bpf_func_state *state = func(env, reg);
 	int min_off, max_off;
 	int err;
+
+	// !!!
+	/*
+	struct bpf_verifier_state *vstate = env->cur_state;
+	state = vstate->frame[vstate->curframe];
+	regs = state->regs;
+	reg = regs + regno;
+	state = func(env, reg);
+	state = vstate->frame[reg->frameno];
+	*/
+
 
 	if (tnum_is_const(reg->var_off)) {
 		min_off = reg->var_off.value + off;
@@ -3716,23 +3733,29 @@ static int check_stack_access_within_bounds(
 		max_off = reg->smax_value + off + access_size - 1;
 	}
 
-	verbose(env, "!!! check_stack_slot_within_bounds: off: [%d,%d] type: %d allocated: %d\n",
-			min_off, max_off, t, state->allocated_stack);
+	verbose(env, "!!! check_stack_slot_within_bounds: off: [%d,%d] type: %d allocated: %d state: 0x%p\n",
+			min_off, max_off, t, state->allocated_stack, state);
 	err = check_stack_slot_within_bounds(min_off, state, t);
-	if (err == 0)
+	if (!err)
 		err = check_stack_slot_within_bounds(max_off, state, t);
 
 	if (err) {
+		char *err_extra;
+		if (t == BPF_READ)
+			err_extra = subt == ACCESS_DIRECT ? " read from" : " indirect read from";
+		else
+			err_extra = subt == ACCESS_DIRECT ? " write to" : " indirect write to";
+
 		if (tnum_is_const(reg->var_off)) {
-			verbose(env, "invalid stack access R%d off=%d access_size=%d\n",
-				regno, off, access_size);
+			verbose(env, "invalid%s stack R%d off=%d access_size=%d\n",
+				err_extra, regno, off, access_size);
 		} else {
 			char tn_buf[48];
 
 			tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
-			verbose(env, "invalid variable-offset stack access R%d "
+			verbose(env, "invalid variable-offset%s R%d "
 					"var_off=%s access_size=%d\n",
-				regno, tn_buf, access_size);
+				err_extra, regno, tn_buf, access_size);
 		}
 	}
 	return err;
@@ -3853,15 +3876,18 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 
 	} else if (reg->type == PTR_TO_STACK) {
 		/* Basic bounds checks. */
-		err = check_stack_access_within_bounds(env, regno, off, size, t);
+		err = check_stack_access_within_bounds(env, regno, off, size, t, ACCESS_DIRECT);
 		if (err)
 			return err;
+		/*
+		verbose(env, "!!! basic bounds checked passed. allocated: %d\n",
+				state->allocated_stack);
+				*/
 
 		state = func(env, reg);
 		err = update_stack_depth(env, state, off);
 		if (err)
 			return err;
-
 
 		if (t == BPF_READ)
 			err = check_stack_read(env, regno, off, size,
@@ -4083,7 +4109,7 @@ static int check_stack_read_access(struct bpf_verifier_env *env, int regno,
 		return -EACCES;
 	}
 
-	err = check_stack_access_within_bounds(env, regno, off, access_size, BPF_READ);
+	err = check_stack_access_within_bounds(env, regno, off, access_size, BPF_READ, type);
 	if (err)
 		return err;
 
@@ -4161,9 +4187,8 @@ static int check_stack_read_access(struct bpf_verifier_env *env, int regno,
 
 		slot = -i - 1;
 		spi = slot / BPF_REG_SIZE;
-		if (state->allocated_stack <= slot) {
+		if (state->allocated_stack <= slot)  // !!! still necessary?
 			goto err;
-		}
 		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
 		if (*stype == STACK_MISC)
 			goto mark;
