@@ -2569,7 +2569,7 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 	struct bpf_reg_state *reg;
 	u8 *stype;
 
-	// !!! still necessary? Test 178 crashes without it, but why?
+	// !!! still necessary? Test 178 crashes without it, but why? I think I fixed the crash?
 	if (reg_state->allocated_stack <= slot) {
 		verbose(env, "!!! xxx off: %d slot: %d allocated: %d state: 0x%p\n", off, slot, reg_state->allocated_stack, reg_state);
 		verbose(env, "invalid read from stack off %d+0 size %d\n",
@@ -2641,8 +2641,8 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 }
 
 enum stack_access_type {
-	ACCESS_DIRECT,  /* the access is performed by an instruction */
-	ACCESS_HELPER,  /* the access is performed by a helper */
+	ACCESS_DIRECT = 1,  /* the access is performed by an instruction */
+	ACCESS_HELPER = 2,  /* the access is performed by a helper */
 };
 
 static int check_stack_range_access(struct bpf_verifier_env *env,
@@ -3714,6 +3714,9 @@ static int check_stack_access_within_bounds(
 	int err;
 	char *err_extra;
 
+	// !!! I think this is non-sense. For ACCESS_DIRECT, we don't actually know
+	// if the helper is reading or writing. The error message should just say
+	// "indirect access".
 	if (t == BPF_READ)
 		err_extra = subt == ACCESS_DIRECT ? " read from" : " indirect read from";
 	else
@@ -4095,9 +4098,9 @@ static int __check_stack_boundary(struct bpf_verifier_env *env, u32 regno,
 }
 */
 
-/* when register 'regno' is used to read the stack (either directly or through
- * a helper function) make sure that it's within stack boundary and,
- * conditionally, that all elements of the stack are initialized.
+/* When register 'regno' is used to read the stack (either directly or through
+ * a helper function) make sure that it's within stack boundary and, depending
+ * on the access type, that all elements of the stack are initialized.
  *
  * 'off' includes 'regno->off', but not its dynamic part (if any).
  *
@@ -4114,7 +4117,7 @@ static int check_stack_range_access(struct bpf_verifier_env *env, int regno,
 	struct bpf_func_state *state = func(env, reg);
 	int err, min_off, max_off, i, j, slot, spi;
 	char *err_extra = type == ACCESS_HELPER ? " indirect" : "";
-	enum bpf_access_type t;
+	enum bpf_access_type bounds_check_type;
 
 
 	if (access_size == 0 && !zero_size_allowed) {
@@ -4122,13 +4125,18 @@ static int check_stack_range_access(struct bpf_verifier_env *env, int regno,
 		return -EACCES;
 	}
 
-	verbose(env, "!!! check_stack_range_access about to do bounds check\n");
-	if (meta && meta->raw_mode)
-		/* The bounds checks for writes are more permissive than for reads. */
-		t = BPF_WRITE;
-	else
-		t = BPF_READ;
-	err = check_stack_access_within_bounds(env, regno, off, access_size, t, type);
+	if (type == ACCESS_HELPER) {
+		/* The bounds checks for writes are more permissive than for
+		 * reads. However, if raw_mode is not set, we'll do extra
+		 * checks below.
+		 */
+		bounds_check_type = BPF_WRITE;
+	} else {
+		bounds_check_type = BPF_READ;
+	}
+	verbose(env, "!!! check_stack_range_access about to do bounds check. bounds_check_type: %d, type: %d, zero allowed: %d\n", bounds_check_type, type, zero_size_allowed);
+	err = check_stack_access_within_bounds(env, regno, off, access_size,
+					       bounds_check_type, type);
 	if (err)
 		return err;
 
@@ -4206,10 +4214,6 @@ static int check_stack_range_access(struct bpf_verifier_env *env, int regno,
 
 		slot = -i - 1;
 		spi = slot / BPF_REG_SIZE;
-		/* This check is still necessary despite the bounds check at the top because
-		 * the bounds check might have been relaxed for "raw mode", but we might
-		 * have moved away from raw mode since then.
-		 */
 		if (state->allocated_stack <= slot)
 			goto err;
 		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
