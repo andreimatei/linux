@@ -1958,7 +1958,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_48b = { 6 },
-	.errstr = "invalid indirect read from stack off -8+0 size 8",
+	.errstr = "invalid indirect read from stack R2 off -8+0 size 8",
 	.result = REJECT,
 	.prog_type = BPF_PROG_TYPE_XDP,
 },

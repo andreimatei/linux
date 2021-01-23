@@ -205,7 +205,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.result = REJECT,
-	.errstr = "invalid indirect write to stack R3 off=-513 size=8",
+	.errstr = "invalid indirect access to stack R3 off=-513 size=8",
 	.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 },
 {
@@ -221,7 +221,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.result = REJECT,
-	.errstr = "invalid indirect write to stack R3 off=-1 size=8",
+	.errstr = "invalid indirect access to stack R3 off=-1 size=8",
 	.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 },
 {
