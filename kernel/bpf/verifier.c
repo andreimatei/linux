@@ -2281,7 +2281,6 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 	u32 dst_reg = env->prog->insnsi[insn_idx].dst_reg;
 	struct bpf_reg_state *reg = NULL;
 
-	verbose(env, "!!! realloc: %d\n", round_up(slot + 1, BPF_REG_SIZE));
 	err = realloc_func_state(state, round_up(slot + 1, BPF_REG_SIZE),
 				 state->acquired_refs, true);
 	if (err)
@@ -2557,6 +2556,8 @@ static void mark_reg_stack_read(struct bpf_verifier_env *env,
  *
  * 'dst_regno' can be -1, meaning that the read value is not going to a
  * register.
+ *
+ * The access is assumed to be within the current stack bounds.
  */
 static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 				      /* func where src register points to */
@@ -2569,13 +2570,6 @@ static int check_stack_read_fixed_off(struct bpf_verifier_env *env,
 	struct bpf_reg_state *reg;
 	u8 *stype;
 
-	// !!! still necessary? Test 178 crashes without it, but why? I think I fixed the crash?
-	if (reg_state->allocated_stack <= slot) {
-		verbose(env, "!!! xxx off: %d slot: %d allocated: %d state: 0x%p\n", off, slot, reg_state->allocated_stack, reg_state);
-		verbose(env, "invalid read from stack off %d+0 size %d\n",
-			off, size);
-		return -EACCES;
-	}
 	stype = reg_state->stack[spi].slot_type;
 	reg = &reg_state->stack[spi].spilled_ptr;
 
@@ -2645,11 +2639,11 @@ enum stack_access_src {
 	ACCESS_HELPER = 2,  /* the access is performed by a helper */
 };
 
-static int check_stack_range_access(struct bpf_verifier_env *env,
-				   int regno, int off, int access_size,
-				   bool zero_size_allowed,
-				   enum stack_access_src type,
-				   struct bpf_call_arg_meta *meta);
+static int check_stack_range_initialized(struct bpf_verifier_env *env,
+					 int regno, int off, int access_size,
+					 bool zero_size_allowed,
+					 enum stack_access_src type,
+					 struct bpf_call_arg_meta *meta);
 
 static struct bpf_reg_state *reg_state(struct bpf_verifier_env *env, int regno)
 {
@@ -2691,8 +2685,8 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 	 * all the stack slots in range [off, off+size) will be clobbered, although
 	 * that's not the case for a stack read.
 	 */
-	err = check_stack_range_access(env, ptr_regno, off, size,
-				      false, ACCESS_DIRECT, NULL);
+	err = check_stack_range_initialized(env, ptr_regno, off, size,
+					    false, ACCESS_DIRECT, NULL);
 	if (err)
 		return err;
 
@@ -2715,11 +2709,6 @@ static int check_stack_read(struct bpf_verifier_env *env,
 			    int ptr_regno, int off, int size,
 			    int dst_regno)
 {
-	/* !!!
-	struct bpf_verifier_state *vstate = env->cur_state;
-	struct bpf_func_state *state = vstate->frame[vstate->curframe];
-	struct bpf_reg_state *reg = state->regs + ptr_regno;
-	*/
 	struct bpf_reg_state *reg = reg_state(env, ptr_regno);
 	struct bpf_func_state *state = func(env, reg);
 	int err;
@@ -2783,12 +2772,6 @@ static int check_stack_write(struct bpf_verifier_env *env,
 			     int ptr_regno, int off, int size,
 			     int value_regno, int insn_idx)
 {
-	// !!! broken
-	/*
-	struct bpf_verifier_state *vstate = env->cur_state;
-	struct bpf_func_state *state = vstate->frame[vstate->curframe];
-	struct bpf_reg_state *reg = state->regs + ptr_regno;
-	*/
 	struct bpf_reg_state *reg = reg_state(env, ptr_regno);
 	struct bpf_func_state *state = func(env, reg);
 	int err;
@@ -3722,18 +3705,6 @@ static int check_stack_access_within_bounds(
 	else
 		err_extra = " write to";
 
-
-	// !!!
-	/*
-	   struct bpf_verifier_state *vstate = env->cur_state;
-	state = vstate->frame[vstate->curframe];
-	regs = state->regs;
-	reg = regs + regno;
-	state = func(env, reg);
-	state = vstate->frame[reg->frameno];
-	*/
-
-
 	if (tnum_is_const(reg->var_off)) {
 		min_off = reg->var_off.value + off;
 		if (access_size > 0)
@@ -3754,8 +3725,6 @@ static int check_stack_access_within_bounds(
 			max_off = min_off;
 	}
 
-	verbose(env, "!!! check_stack_slot_within_bounds: off: [%d,%d] type: %d allocated: %d state: 0x%p\n",
-			min_off, max_off, type, state->allocated_stack, state);
 	err = check_stack_slot_within_bounds(min_off, state, type);
 	if (!err)
 		err = check_stack_slot_within_bounds(max_off, state, type);
@@ -3891,14 +3860,9 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 
 	} else if (reg->type == PTR_TO_STACK) {
 		/* Basic bounds checks. */
-		verbose(env, "!!! check_mem_access about to do bounds check\n");
 		err = check_stack_access_within_bounds(env, regno, off, size, ACCESS_DIRECT, t);
 		if (err)
 			return err;
-		/*
-		verbose(env, "!!! basic bounds checked passed. allocated: %d\n",
-				state->allocated_stack);
-				*/
 
 		state = func(env, reg);
 		err = update_stack_depth(env, state, off);
@@ -4073,31 +4037,6 @@ static int check_atomic(struct bpf_verifier_env *env, int insn_idx, struct bpf_i
 	return 0;
 }
 
-// !!! are calls to this still necessary, given that I've lifted some bound checks?
-/*
-static int __check_stack_boundary(struct bpf_verifier_env *env, u32 regno,
-				  int off, int access_size)
-{
-	struct bpf_reg_state *reg = reg_state(env, regno);
-
-	if (off >= 0 || off < -MAX_BPF_STACK || off + access_size > 0 ||
-	    access_size < 0) {
-		if (tnum_is_const(reg->var_off)) {
-			verbose(env, "invalid stack type R%d off=%d access_size=%d\n",
-				regno, off, access_size);
-		} else {
-			char tn_buf[48];
-
-			tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
-			verbose(env, "invalid stack type R%d var_off=%s access_size=%d\n",
-				regno, tn_buf, access_size);
-		}
-		return -EACCES;
-	}
-	return 0;
-}
-*/
-
 /* When register 'regno' is used to read the stack (either directly or through
  * a helper function) make sure that it's within stack boundary and, depending
  * on the access type, that all elements of the stack are initialized.
@@ -4107,11 +4046,10 @@ static int __check_stack_boundary(struct bpf_verifier_env *env, u32 regno,
  * All registers that have been spilled on the stack in the slots within the
  * read offsets are marked as read.
  */
-// !!! rename this to something about initialized
-static int check_stack_range_access(struct bpf_verifier_env *env, int regno,
-				   int off, int access_size, bool zero_size_allowed,
-				   enum stack_access_src type,
-				   struct bpf_call_arg_meta *meta)
+static int check_stack_range_initialized(
+		struct bpf_verifier_env *env, int regno, int off,
+		int access_size, bool zero_size_allowed,
+		enum stack_access_src type, struct bpf_call_arg_meta *meta)
 {
 	struct bpf_reg_state *reg = reg_state(env, regno);
 	struct bpf_func_state *state = func(env, reg);
@@ -4134,21 +4072,12 @@ static int check_stack_range_access(struct bpf_verifier_env *env, int regno,
 	} else {
 		bounds_check_type = BPF_READ;
 	}
-	verbose(env, "!!! check_stack_range_access about to do bounds check. bounds_check_type: %d, type: %d, zero allowed: %d\n", bounds_check_type, type, zero_size_allowed);
 	err = check_stack_access_within_bounds(env, regno, off, access_size,
 					       type, bounds_check_type);
 	if (err)
 		return err;
 
 
-	/* !!!
-	if (tnum_is_const(reg->var_off)) {
-		min_off = max_off = reg->var_off.value + off;
-		err = __check_stack_boundary(env, regno, min_off, access_size);
-		if (err)
-			return err;
-	} else {
-	*/
 	if (tnum_is_const(reg->var_off)) {
 		min_off = max_off = reg->var_off.value + off;
 	} else {
@@ -4174,31 +4103,6 @@ static int check_stack_range_access(struct bpf_verifier_env *env, int regno,
 		if (meta && meta->raw_mode)
 			meta = NULL;
 
-		// !!!
-		/*
-		if (reg->smax_value >= BPF_MAX_VAR_OFF ||
-		    reg->smax_value <= -BPF_MAX_VAR_OFF) {
-			verbose(env, "R%d unbounded%s variable offset stack access\n",
-				regno, err_extra);
-			return -EACCES;
-		}
-		min_off = reg->smin_value + off;
-		max_off = reg->smax_value + off;
-		err = __check_stack_boundary(env, regno, min_off, access_size);
-		if (err) {
-			verbose(env, "R%d min value is outside of stack bound\n",
-				regno);
-			return err;
-		}
-		err = __check_stack_boundary(env, regno, max_off, access_size);
-		if (err) {
-			verbose(env, "R%d max value is outside of stack bound\n",
-				regno);
-			return err;
-		}
-		*/
-
-		// !!! this is instead of all the above
 		min_off = reg->smin_value + off;
 		max_off = reg->smax_value + off;
 	}
@@ -4296,7 +4200,7 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 					   "rdwr",
 					   &env->prog->aux->max_rdwr_access);
 	case PTR_TO_STACK:
-		return check_stack_range_access(
+		return check_stack_range_initialized(
 				env,
 				regno, reg->off, access_size,
 				zero_size_allowed, ACCESS_HELPER, meta);
