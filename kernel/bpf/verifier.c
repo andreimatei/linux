@@ -4056,7 +4056,9 @@ static int check_stack_range_initialized(
 	int err, min_off, max_off, i, j, slot, spi;
 	char *err_extra = type == ACCESS_HELPER ? " indirect" : "";
 	enum bpf_access_type bounds_check_type;
-
+	/* Some accesses can write anything into the stack, others are
+	 * read-only. */
+	bool clobber = false;
 
 	if (access_size == 0 && !zero_size_allowed) {
 		verbose(env, "invalid zero-sized read\n");
@@ -4069,6 +4071,7 @@ static int check_stack_range_initialized(
 		 * checks below.
 		 */
 		bounds_check_type = BPF_WRITE;
+		clobber = true;
 	} else {
 		bounds_check_type = BPF_READ;
 	}
@@ -4124,8 +4127,10 @@ static int check_stack_range_initialized(
 		if (*stype == STACK_MISC)
 			goto mark;
 		if (*stype == STACK_ZERO) {
-			/* helper can write anything into the stack */
-			*stype = STACK_MISC;
+			if (clobber) {
+				/* helper can write anything into the stack */
+				*stype = STACK_MISC;
+			}
 			goto mark;
 		}
 
@@ -4136,9 +4141,11 @@ static int check_stack_range_initialized(
 		if (state->stack[spi].slot_type[0] == STACK_SPILL &&
 		    (state->stack[spi].spilled_ptr.type == SCALAR_VALUE ||
 		     env->allow_ptr_leaks)) {
-			__mark_reg_unknown(env, &state->stack[spi].spilled_ptr);
-			for (j = 0; j < BPF_REG_SIZE; j++)
-				state->stack[spi].slot_type[j] = STACK_MISC;
+			if (clobber) {
+				__mark_reg_unknown(env, &state->stack[spi].spilled_ptr);
+				for (j = 0; j < BPF_REG_SIZE; j++)
+					state->stack[spi].slot_type[j] = STACK_MISC;
+			}
 			goto mark;
 		}
 
