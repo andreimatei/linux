@@ -2273,7 +2273,7 @@ static void save_register_state(struct bpf_func_state *state,
  * stack boundary and alignment are checked in check_mem_access()
  */
 static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
-			     struct bpf_func_state *state, /* func where register points to */
+			     struct bpf_func_state *state, /* stack frame we're writing to */
 			     int off, int size, int value_regno, int insn_idx)
 {
 	struct bpf_func_state *cur; /* state of the current function */
@@ -2680,10 +2680,7 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 			__func__, ptr_regno, tn_buf, off, size);
 		return -EINVAL;
 	}
-	/* Note that we pass a NULL meta, so raw access will not be permitted. Also
-	 * note that, for simplicity, check_stack_range_access is going to pretend that
-	 * all the stack slots in range [off, off+size) will be clobbered, although
-	 * that's not the case for a stack read.
+	/* Note that we pass a NULL meta, so raw access will not be permitted.
 	 */
 	err = check_stack_range_initialized(env, ptr_regno, off, size,
 					    false, ACCESS_DIRECT, NULL);
@@ -5877,27 +5874,31 @@ do_sim:
 /* check that stack access falls within stack limits and that 'reg' doesn't
  * have a variable offset.
  *
+ * Variable offset is prohibited for unprivileged mode for simplicity since it
+ * requires corresponding support in Spectre masking for stack ALU.  See also
+ * retrieve_ptr_limit().
+ *
+ *
  * 'off' includes 'reg->off'.
  */
 static int check_stack_access_for_ptr_arithmetic(
 				struct bpf_verifier_env *env,
+				int regno,
 				const struct bpf_reg_state *reg,
-				int off, int size)
+				int off)
 {
-	/* Stack accesses must be at a fixed offset for register spill tracking.
-	 * See check_stack_write_fixed_off().
-	 */
 	if (!tnum_is_const(reg->var_off)) {
 		char tn_buf[48];
 
 		tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
-		verbose(env, "variable stack access var_off=%s off=%d size=%d\n",
-			tn_buf, off, size);
+		verbose(env, "R%d variable stack access prohibited for !root, var_off=%s off=%d\n",
+			regno, tn_buf, off);
 		return -EACCES;
 	}
 
 	if (off >= 0 || off < -MAX_BPF_STACK) {
-		verbose(env, "invalid stack off=%d size=%d\n", off, size);
+		verbose(env, "R%d stack pointer arithmetic goes out of range, "
+			"prohibited for !root; off=%d\n", regno, off);
 		return -EACCES;
 	}
 
@@ -6149,10 +6150,8 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 			return -EACCES;
 		} else if (dst_reg->type == PTR_TO_STACK &&
 			   check_stack_access_for_ptr_arithmetic(
-				   env, dst_reg, dst_reg->off +
-				   dst_reg->var_off.value, 1)) {
-			verbose(env, "R%d stack pointer arithmetic goes out of range, "
-				"prohibited for !root\n", dst);
+				   env, dst, dst_reg, dst_reg->off +
+				   dst_reg->var_off.value)) {
 			return -EACCES;
 		}
 	}
