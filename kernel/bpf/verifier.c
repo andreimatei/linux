@@ -1687,17 +1687,7 @@ static int resize_reference_state(struct bpf_func_state *state, size_t n)
 
 static int update_stack_depth(struct bpf_verifier_env *env,
 			      const struct bpf_func_state *func,
-			      int off)
-{
-	u16 stack = env->subprog_info[func->subprogno].stack_depth;
-
-	if (stack >= -off)
-		return 0;
-
-	/* update known max for given subprogram */
-	env->subprog_info[func->subprogno].stack_depth = -off;
-	return 0;
-}
+			      int off);
 
 /* Possibly update state->allocated_stack to be at least size bytes. Also
  * possibly update the function's high-water mark in its bpf_subprog_info.
@@ -4690,6 +4680,7 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 	struct bpf_reg_state *reg = NULL;
 	u32 dst_reg = insn->dst_reg;
 
+ 	// !!!
 	err = grow_stack_state(env, state, round_up(slot + 1, BPF_REG_SIZE));
 	if (err)
 		return err;
@@ -4848,6 +4839,7 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
 	    (!value_reg && is_bpf_st_mem(insn) && insn->imm == 0))
 		writing_zero = true;
 
+	// !!!
 	err = grow_stack_state(env, state, round_up(-min_off, BPF_REG_SIZE));
 	if (err)
 		return err;
@@ -6801,6 +6793,8 @@ static int check_stack_access_within_bounds(
 	int err;
 	char *err_extra;
 
+	bpf_log(&env->log, "!!! check_stack_access_within_bounds");
+
 	if (src == ACCESS_HELPER)
 		/* We don't know if helpers are reading or writing (or both). */
 		err_extra = " indirect access to";
@@ -6844,8 +6838,28 @@ static int check_stack_access_within_bounds(
 			verbose(env, "invalid variable-offset%s stack R%d var_off=%s size=%d\n",
 				err_extra, regno, tn_buf, access_size);
 		}
+		return err;
 	}
+
+	// // !!!
+	bpf_log(&env->log, "!!! min_off: %d, max_off: %d. access type: %d\n", min_off, max_off, type);
+	err = grow_stack_state(env, state, round_up(-min_off, BPF_REG_SIZE));
 	return err;
+	//return 0;
+}
+
+static int update_stack_depth(struct bpf_verifier_env *env,
+			      const struct bpf_func_state *func,
+			      int off)
+{
+	u16 stack = env->subprog_info[func->subprogno].stack_depth;
+
+	if (stack >= -off)
+		return 0;
+
+	/* update known max for given subprogram */
+	env->subprog_info[func->subprogno].stack_depth = -off;
+	return 0;
 }
 
 /* check whether memory at (regno + off) is accessible for t = (read | write)
@@ -6861,6 +6875,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = regs + regno;
 	int size, err = 0;
+	bpf_log(&env->log, "!!! check_mem_access");
 
 	size = bpf_size_to_bytes(bpf_size);
 	if (size < 0)
@@ -7354,7 +7369,9 @@ mark:
 		 * helper may write to the entire memory range.
 		 */
 	}
+	// !!! 
 	return update_stack_depth(env, state, min_off);
+	// !!! return 0;
 }
 
 static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,

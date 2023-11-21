@@ -597,7 +597,7 @@ void run_subtest(struct test_loader *tester,
 	err = bpf_object__load(tobj);
 	if (subspec->expect_failure) {
 		if (!ASSERT_ERR(err, "unexpected_load_success")) {
-			emit_verifier_log(tester->log_buf, false /*force*/);
+			emit_verifier_log(tester->log_buf, true /*force*/);
 			goto tobj_cleanup;
 		}
 	} else {
