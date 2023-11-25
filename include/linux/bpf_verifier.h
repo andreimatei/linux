@@ -630,6 +630,7 @@ struct bpf_verifier_env {
 	int exception_callback_subprog;
 	bool explore_alu_limits;
 	bool allow_ptr_leaks;
+	/* allow reads from uninitialized stack memory; writes are always allowed */
 	bool allow_uninit_stack;
 	bool bpf_capable;
 	bool bypass_spec_v1;

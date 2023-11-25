@@ -6760,13 +6760,15 @@ static int check_ptr_to_map_access(struct bpf_verifier_env *env,
  * The minimum valid offset is -MAX_BPF_STACK for writes, and
  * -state->allocated_stack for reads.
  */
-static int check_stack_slot_within_bounds(int off,
-					  struct bpf_func_state *state,
-					  enum bpf_access_type t)
+static int check_stack_slot_within_bounds(
+					struct bpf_verifier_env *env,
+					int off,
+					struct bpf_func_state *state,
+					enum bpf_access_type t)
 {
 	int min_valid_off;
 
-	if (t == BPF_WRITE)
+	if (t == BPF_WRITE || env->allow_uninit_stack)
 		min_valid_off = -MAX_BPF_STACK;
 	else
 		min_valid_off = -state->allocated_stack;
@@ -6793,7 +6795,7 @@ static int check_stack_access_within_bounds(
 	int err;
 	char *err_extra;
 
-	bpf_log(&env->log, "!!! check_stack_access_within_bounds");
+	// !!! bpf_log(&env->log, "!!! check_stack_access_within_bounds");
 
 	if (src == ACCESS_HELPER)
 		/* We don't know if helpers are reading or writing (or both). */
@@ -6823,9 +6825,9 @@ static int check_stack_access_within_bounds(
 			max_off = min_off;
 	}
 
-	err = check_stack_slot_within_bounds(min_off, state, type);
+	err = check_stack_slot_within_bounds(env, min_off, state, type);
 	if (!err)
-		err = check_stack_slot_within_bounds(max_off, state, type);
+		err = check_stack_slot_within_bounds(env, max_off, state, type);
 
 	if (err) {
 		if (tnum_is_const(reg->var_off)) {
@@ -6875,7 +6877,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 	struct bpf_reg_state *regs = cur_regs(env);
 	struct bpf_reg_state *reg = regs + regno;
 	int size, err = 0;
-	bpf_log(&env->log, "!!! check_mem_access");
+	//bpf_log(&env->log, "!!! check_mem_access");
 
 	size = bpf_size_to_bytes(bpf_size);
 	if (size < 0)
@@ -7319,6 +7321,7 @@ static int check_stack_range_initialized(
 
 		slot = -i - 1;
 		spi = slot / BPF_REG_SIZE;
+		// !!! still needed?
 		if (state->allocated_stack <= slot)
 			goto err;
 		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
