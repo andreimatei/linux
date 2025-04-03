@@ -366,6 +366,9 @@ static int bpf_adj_delta_to_imm(struct bpf_insn *insn, u32 pos, s32 end_old,
 	const s64 imm_min = S32_MIN, imm_max = S32_MAX;
 	s32 delta = end_new - end_old;
 	s64 imm = insn->imm;
+	if (curr >= 2070 && curr < 2200) {
+		printk(KERN_WARNING "!!! bpf_adj_delta_to_imm: i: %d, delta: %d\n", curr, delta);
+	}
 
 	if (curr < pos && curr + imm + 1 >= end_old)
 		imm += delta;
@@ -415,6 +418,9 @@ static int bpf_adj_branches(struct bpf_prog *prog, u32 pos, s32 end_old,
 	u32 i, insn_cnt = prog->len + (probe_pass ? end_new - end_old : 0);
 	struct bpf_insn *insn = prog->insnsi;
 	int ret = 0;
+	if (pos > 2000 && pos < 2100) {
+		printk(KERN_WARNING "!!! bpf_adj_branches: pos: %d, count: %d\n", pos, insn_cnt);
+	}
 
 	for (i = 0; i < insn_cnt; i++, insn++) {
 		u8 code;

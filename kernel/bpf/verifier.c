@@ -14166,6 +14166,11 @@ static void sanitize_mark_insn_seen(struct bpf_verifier_env *env)
 {
 	struct bpf_verifier_state *vstate = env->cur_state;
 
+	// if (!env->insn_aux_data[env->insn_idx].seen) {
+		verbose(env, "!!! marking instruction %d seen. speculative: %d\n",
+			env->insn_idx, vstate->speculative);
+	// }
+
 	/* If we simulate paths under speculation, we don't update the
 	 * insn as 'seen' such that when we verify unreachable paths in
 	 * the non-speculative domain, sanitize_dead_code() can still
@@ -20284,6 +20289,9 @@ static void adjust_insn_aux_data(struct bpf_verifier_env *env,
 	       sizeof(struct bpf_insn_aux_data) * (prog_len - off - cnt + 1));
 	for (i = off; i < off + cnt - 1; i++) {
 		/* Expand insni[off]'s seen count to the patched range. */
+		if (old_seen) {
+			verbose(env, "!!! marking instruction seen through adjust_insn: %d\n", i);
+		}
 		new_data[i].seen = old_seen;
 		new_data[i].zext_dst = insn_has_def32(env, insn + i);
 	}
@@ -20511,6 +20519,7 @@ static int verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 cnt)
 	unsigned int orig_prog_len = env->prog->len;
 	int err;
 	verbose(env, "!!! removing %d insns at %d\n", cnt, off);
+	verbose(env, "!!! before bpf_remove_insn, instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	if (bpf_prog_is_offloaded(env->prog->aux))
 		bpf_prog_offload_remove_insns(env, off, cnt);
@@ -20518,6 +20527,7 @@ static int verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 cnt)
 	err = bpf_remove_insns(env->prog, off, cnt);
 	if (err)
 		return err;
+	verbose(env, "!!! after bpf_remove_insn, instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	err = adjust_subprog_starts_after_remove(env, off, cnt);
 	if (err)
@@ -21595,11 +21605,13 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			BPF_EXIT_INSN(),
 		};
 
+		verbose(env, "!!! do_misc_fixups: before add_hidden. %d insts, 2077 has imm: %d\n", prog->len, env->prog->insnsi[2077].imm);
 		ret = add_hidden_subprog(env, patch, ARRAY_SIZE(patch));
 		if (ret < 0)
 			return ret;
 		prog = env->prog;
 		insn = prog->insnsi;
+		verbose(env, "!!! do_misc_fixups: after add_hidden. %d insts, 2077 has imm: %d\n", prog->len, env->prog->insnsi[2077].imm);
 
 		env->exception_callback_subprog = env->subprog_cnt - 1;
 		/* Don't update insn_cnt, as add_hidden_subprog always appends insns */
@@ -21607,6 +21619,10 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 	}
 
 	for (i = 0; i < insn_cnt;) {
+		if (i == 2077) {
+			verbose(env, "!!! do_misc_fixups looking at instruction 2077. has imm: %d\n", env->prog->insnsi[2077].imm);
+		}
+		verbose(env, "!!! do_misc_fixups looking at instruction %d / %d. 2077 has imm: %d\n", i, prog->len, env->prog->insnsi[2077].imm);
 		if (insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) && insn->imm) {
 			if ((insn->off == BPF_ADDR_SPACE_CAST && insn->imm == 1) ||
 			    (((struct bpf_map *)env->prog->aux->arena)->map_flags & BPF_F_NO_USER_CONV)) {
@@ -21853,6 +21869,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 		}
 
 		if (is_may_goto_insn(insn) && bpf_jit_supports_timed_may_goto()) {
+			verbose(env, "!!! patch may_goto");
 			int stack_off_cnt = -stack_depth - 16;
 
 			/*
@@ -21896,6 +21913,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			insn = new_prog->insnsi + i + delta;
 			goto next_insn;
 		} else if (is_may_goto_insn(insn)) {
+			verbose(env, "!!! patch may_goto 2");
 			int stack_off = -stack_depth - 8;
 
 			stack_depth_extra = 8;
@@ -21929,6 +21947,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			if (cnt == 0)
 				goto next_insn;
 
+			verbose(env, "!!! patch pseudo_kfunc_call");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22014,6 +22033,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 								 map)->index_mask);
 			insn_buf[2] = *insn;
 			cnt = 3;
+			verbose(env, "!!! patch tail call");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22047,6 +22067,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			insn_buf[2] = *insn;
 			cnt = 3;
 
+			verbose(env, "!!! patch timer");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22066,6 +22087,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			insn_buf[1] = *insn;
 			cnt = 2;
 
+			verbose(env, "!!! patch storage");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22085,6 +22107,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			insn_buf[1] = *insn;
 			cnt = 2;
 
+			verbose(env, "!!! patch xxx");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22125,6 +22148,7 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 					return -EINVAL;
 				}
 
+				verbose(env, "!!! patch map lookup with %d instructions\n", cnt);
 				new_prog = bpf_patch_insn_data(env, i + delta,
 							       insn_buf, cnt);
 				if (!new_prog)
@@ -22208,6 +22232,7 @@ patch_map_ops_generic:
 						  BPF_REG_0, 0);
 			cnt = 3;
 
+			verbose(env, "!!! patch jiffies");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf,
 						       cnt);
 			if (!new_prog)
@@ -22237,6 +22262,7 @@ patch_map_ops_generic:
 			insn_buf[0] = BPF_ALU32_REG(BPF_XOR, BPF_REG_0, BPF_REG_0);
 			cnt = 1;
 #endif
+			verbose(env, "!!! patch get_smp");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22262,6 +22288,7 @@ patch_map_ops_generic:
 			insn_buf[8] = BPF_MOV64_IMM(BPF_REG_0, -EINVAL);
 			cnt = 9;
 
+			verbose(env, "!!! patch get_func_arg");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22290,6 +22317,7 @@ patch_map_ops_generic:
 				cnt = 1;
 			}
 
+			verbose(env, "!!! patch get_func_ret");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22306,6 +22334,7 @@ patch_map_ops_generic:
 			/* Load nr_args from ctx - 8 */
 			insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -8);
 
+			verbose(env, "!!! patch xxx");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, 1);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22321,6 +22350,7 @@ patch_map_ops_generic:
 			/* Load IP address from ctx - 16 */
 			insn_buf[0] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, -16);
 
+			verbose(env, "!!! patch xxx");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, 1);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22376,6 +22406,7 @@ patch_map_ops_generic:
 			insn_buf[10] = BPF_MOV64_IMM(BPF_REG_0, -ENOENT);
 			cnt = 11;
 
+			verbose(env, "!!! patch xxx");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22394,6 +22425,7 @@ patch_map_ops_generic:
 			insn_buf[1] = BPF_ATOMIC_OP(BPF_DW, BPF_XCHG, BPF_REG_1, BPF_REG_0, 0);
 			cnt = 2;
 
+			verbose(env, "!!! patch xxx");
 			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
 			if (!new_prog)
 				return -ENOMEM;
@@ -22462,6 +22494,7 @@ next_insn:
 		/* Copy first actual insn to preserve it */
 		insn_buf[cnt++] = env->prog->insnsi[subprog_start];
 
+		verbose(env, "!!! patch xxx");
 		new_prog = bpf_patch_insn_data(env, subprog_start, insn_buf, cnt);
 		if (!new_prog)
 			return -ENOMEM;
@@ -24074,6 +24107,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	if (ret < 0)
 		goto skip_full_check;
 
+	verbose(env, "!!! before do_check_main, 6 seen: %d\n: ",env->insn_aux_data[6].seen);
 	ret = do_check_main(env);
 	ret = ret ?: do_check_subprogs(env);
 
@@ -24093,6 +24127,8 @@ skip_full_check:
 		ret = check_max_stack_depth(env);
 
 	/* instruction rewrites happen after this point */
+	
+	verbose(env, "!!! before optimize_bpf_loop, 6 seen: %d\n: ",env->insn_aux_data[6].seen);
 	if (ret == 0)
 		ret = optimize_bpf_loop(env);
 
@@ -24102,7 +24138,8 @@ skip_full_check:
 	for (j = 0, insn = env->prog->insnsi; j < env->prog->len; j++, insn++) {
 		verbose_linfo(env, j, "; ");
 		env->prev_log_pos = env->log.end_pos;
-		verbose(env, "%d: ", j);
+		u32 seen  = env->insn_aux_data[j].seen;
+		verbose(env, "%d (seen: %d): ", j, seen);
 		verbose_insn(env, insn);
 		env->prev_insn_print_pos = env->log.end_pos - env->prev_log_pos;
 		env->prev_log_pos = env->log.end_pos;
@@ -24120,13 +24157,16 @@ skip_full_check:
 		if (ret == 0)
 			sanitize_dead_code(env);
 	}
+	verbose(env, "!!! after dead code elimination, instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	if (ret == 0)
 		/* program is valid, convert *(u32*)(ctx + off) accesses */
 		ret = convert_ctx_accesses(env);
+	verbose(env, "!!! 0.1: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	if (ret == 0)
 		ret = do_misc_fixups(env);
+	verbose(env, "!!! 0.2: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	/* do 32-bit optimization after insn patching has done so those patched
 	 * insns could be handled correctly.
@@ -24136,9 +24176,11 @@ skip_full_check:
 		env->prog->aux->verifier_zext = bpf_jit_needs_zext() ? !ret
 								     : false;
 	}
+	verbose(env, "!!! 0.3: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	if (ret == 0)
 		ret = fixup_call_args(env);
+	verbose(env, "!!! 1: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	env->verification_time = ktime_get_ns() - start_time;
 	print_verification_stats(env);
@@ -24155,6 +24197,7 @@ skip_full_check:
 		ret = -EFAULT;
 		goto err_release_maps;
 	}
+	verbose(env, "!!! 2: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	if (ret)
 		goto err_release_maps;
@@ -24194,8 +24237,10 @@ skip_full_check:
 		 */
 		convert_pseudo_ld_imm64(env);
 	}
+	verbose(env, "!!! 3: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 	adjust_btf_func(env);
+	verbose(env, "!!! 4: instruction 2077 has imm: %d\n", env->prog->insnsi[2077].imm);
 
 err_release_maps:
 	if (!env->prog->aux->used_maps)
