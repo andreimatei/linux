@@ -3342,8 +3342,12 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 			return -EPERM;
 		}
 
-		if (bpf_pseudo_func(insn) || bpf_pseudo_call(insn))
+		if (bpf_pseudo_func(insn) || bpf_pseudo_call(insn)) {
 			ret = add_subprog(env, i + insn->imm + 1);
+			verbose(env, "!!! adding subprogram starting at %d. subprog called by insn %d. imm: %d. ps_func: %d, ps_call: %d\n",
+				 i + insn->imm + 1, i, insn->imm, bpf_pseudo_func(insn), bpf_pseudo_call(insn));
+
+		}
 		else
 			ret = add_kfunc_call(env, insn->imm, insn->off);
 
@@ -3360,6 +3364,8 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	 * marked using BTF decl tag to serve as the exception callback.
 	 */
 	if (ex_cb_insn) {
+		verbose(env, "!!! adding exception callback subprogram starting at %d\n",
+				 ex_cb_insn);
 		ret = add_subprog(env, ex_cb_insn);
 		if (ret < 0)
 			return ret;
@@ -3376,8 +3382,9 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	 * logic. 'subprog_cnt' should not be increased.
 	 */
 	subprog[env->subprog_cnt].start = insn_cnt;
+	verbose(env, "!!! fake exit subprogram starting at %d\n", insn_cnt);
 
-	if (env->log.level & BPF_LOG_LEVEL2)
+	// !!! if (env->log.level & BPF_LOG_LEVEL2)
 		for (i = 0; i < env->subprog_cnt; i++)
 			verbose(env, "func#%d @%d\n", i, subprog[i].start);
 
@@ -20503,6 +20510,7 @@ static int verifier_remove_insns(struct bpf_verifier_env *env, u32 off, u32 cnt)
 	struct bpf_insn_aux_data *aux_data = env->insn_aux_data;
 	unsigned int orig_prog_len = env->prog->len;
 	int err;
+	verbose(env, "!!! removing %d insns at %d\n", cnt, off);
 
 	if (bpf_prog_is_offloaded(env->prog->aux))
 		bpf_prog_offload_remove_insns(env, off, cnt);
@@ -20597,7 +20605,9 @@ static int opt_remove_dead_code(struct bpf_verifier_env *env)
 	struct bpf_insn_aux_data *aux_data = env->insn_aux_data;
 	int insn_cnt = env->prog->len;
 	int i, err;
+	int first = 1;
 
+	verbose(env, "!!! removing dead code...\n");
 	for (i = 0; i < insn_cnt; i++) {
 		int j;
 
@@ -20607,11 +20617,20 @@ static int opt_remove_dead_code(struct bpf_verifier_env *env)
 		if (!j)
 			continue;
 
+		// !!!
+		if (!(j == 2)) {
+			continue;
+		}
+		if (first) {
+			first = 0;
+			continue;
+		}
 		err = verifier_remove_insns(env, i, j);
 		if (err)
 			return err;
 		insn_cnt = env->prog->len;
 	}
+	verbose(env, "!!! removing dead code... done\n");
 
 	return 0;
 }
@@ -21028,8 +21047,21 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 	void *old_bpf_func;
 	int err, num_exentries;
 
+	verbose(env, "jit_subprogs. num subprogs: %d\n", env->subprog_cnt);
+
 	if (env->subprog_cnt <= 1)
 		return 0;
+
+	verbose(env, "!!! program before jit !!!:\n");
+	for (i = 0, insn = prog->insnsi; i < prog->len; i++, insn++) {
+		verbose_linfo(env, i, "; ");
+		env->prev_log_pos = env->log.end_pos;
+		verbose(env, "%d: ", i);
+		verbose_insn(env, insn);
+		env->prev_insn_print_pos = env->log.end_pos - env->prev_log_pos;
+		env->prev_log_pos = env->log.end_pos;
+	}
+
 
 	for (i = 0, insn = prog->insnsi; i < prog->len; i++, insn++) {
 		if (!bpf_pseudo_func(insn) && !bpf_pseudo_call(insn))
@@ -21041,6 +21073,16 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 		 */
 		subprog = find_subprog(env, i + insn->imm + 1);
 		if (subprog < 0) {
+
+			for (int i = 0; i < env->subprog_cnt; i++) {
+				subprog_start = subprog_end;
+				subprog_end = env->subprog_info[i + 1].start;
+				verbose(env, "!!! subprog %d (%s): start: %d, end: %d (len: %d)\n",
+				 i, subprog_name(env, i), subprog_start, subprog_end, subprog_end - subprog_start);
+			}
+
+			verbose(env, "verifier bug. No program starts at insn %d. idx: %d, imm: %d. src_reg: %d, dst_reg: %d, ps_func: %d, ps_call: %d\n",
+				 i + insn->imm + 1, i, insn->imm, insn->src_reg, insn->dst_reg, bpf_pseudo_func(insn), bpf_pseudo_call(insn));
 			WARN_ONCE(1, "verifier bug. No program starts at insn %d\n",
 				  i + insn->imm + 1);
 			return -EFAULT;
@@ -22656,6 +22698,7 @@ static void free_states(struct bpf_verifier_env *env)
 
 static int do_check_common(struct bpf_verifier_env *env, int subprog)
 {
+	verbose(env, "checking global subprogram %d: %s()...\n", subprog, subprog_name(env, subprog));
 	bool pop_log = !(env->log.level & BPF_LOG_LEVEL2);
 	struct bpf_subprog_info *sub = subprog_info(env, subprog);
 	struct bpf_prog_aux *aux = env->prog->aux;
@@ -22783,8 +22826,9 @@ out:
 		env->cur_state = NULL;
 	}
 	while (!pop_stack(env, NULL, NULL, false));
-	if (!ret && pop_log)
-		bpf_vlog_reset(&env->log, 0);
+	// !!!
+	// if (!ret && pop_log)
+	// 	bpf_vlog_reset(&env->log, 0);
 	free_states(env);
 	return ret;
 }
@@ -24052,13 +24096,26 @@ skip_full_check:
 	if (ret == 0)
 		ret = optimize_bpf_loop(env);
 
+	verbose(env, "!!! program before optimizations !!!\n");
+	struct bpf_insn *insn;
+	int j;
+	for (j = 0, insn = env->prog->insnsi; j < env->prog->len; j++, insn++) {
+		verbose_linfo(env, j, "; ");
+		env->prev_log_pos = env->log.end_pos;
+		verbose(env, "%d: ", j);
+		verbose_insn(env, insn);
+		env->prev_insn_print_pos = env->log.end_pos - env->prev_log_pos;
+		env->prev_log_pos = env->log.end_pos;
+	}
+
+
 	if (is_priv) {
-		if (ret == 0)
-			opt_hard_wire_dead_code_branches(env);
+		// if (ret == 0)
+		// 	opt_hard_wire_dead_code_branches(env);
 		if (ret == 0)
 			ret = opt_remove_dead_code(env);
-		if (ret == 0)
-			ret = opt_remove_nops(env);
+		// if (ret == 0)
+		// 	ret = opt_remove_nops(env);
 	} else {
 		if (ret == 0)
 			sanitize_dead_code(env);
