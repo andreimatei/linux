@@ -2896,6 +2896,8 @@ static int add_subprog(struct bpf_verifier_env *env, int off)
 		return -E2BIG;
 	}
 	/* determine subprog starts. The end is one before the next starts */
+	verbose(env, "!!! add_subprog: couldn't find subprog for off: %d. adding a new one?\n",
+		off);
 	env->subprog_info[env->subprog_cnt++].start = off;
 	sort(env->subprog_info, env->subprog_cnt,
 	     sizeof(env->subprog_info[0]), cmp_subprogs, NULL);
@@ -3343,10 +3345,11 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 		}
 
 		if (bpf_pseudo_func(insn) || bpf_pseudo_call(insn)) {
+			verbose(env, "!!! adding subprogram starting at %d. subprog called by insn %d / %d. imm: %d. ps_func: %d, ps_call: %d\n",
+				 i + insn->imm + 1, i,
+				 insn_cnt,
+				 insn->imm, bpf_pseudo_func(insn), bpf_pseudo_call(insn));
 			ret = add_subprog(env, i + insn->imm + 1);
-			verbose(env, "!!! adding subprogram starting at %d. subprog called by insn %d. imm: %d. ps_func: %d, ps_call: %d\n",
-				 i + insn->imm + 1, i, insn->imm, bpf_pseudo_func(insn), bpf_pseudo_call(insn));
-
 		}
 		else
 			ret = add_kfunc_call(env, insn->imm, insn->off);
@@ -3385,8 +3388,10 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 	verbose(env, "!!! fake exit subprogram starting at %d\n", insn_cnt);
 
 	// !!! if (env->log.level & BPF_LOG_LEVEL2)
-		for (i = 0; i < env->subprog_cnt; i++)
-			verbose(env, "func#%d @%d\n", i, subprog[i].start);
+		for (i = 0; i < env->subprog_cnt; i++) {
+			const char *sub_name = subprog_name(env, i);
+			verbose(env, "func#%d @%d (%s)\n", i, subprog[i].start, sub_name);
+		}
 
 	return 0;
 }
@@ -10458,6 +10463,7 @@ static int push_callback_call(struct bpf_verifier_env *env, struct bpf_insn *ins
 	struct bpf_verifier_state *state = env->cur_state, *callback_state;
 	struct bpf_func_state *caller, *callee;
 	int err;
+	verbose(env, "   push_callback_call for subprog: %d (starting at %d)\n", subprog, env->subprog_info[subprog].start);
 
 	caller = state->frame[state->curframe];
 	err = btf_check_subprog_call(env, subprog, caller->regs);
@@ -10526,6 +10532,7 @@ static int check_func_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	struct bpf_verifier_state *state = env->cur_state;
 	struct bpf_func_state *caller;
 	int err, subprog, target_insn;
+	verbose(env, "!!! check_func_call\n");
 
 	target_insn = *insn_idx + insn->imm + 1;
 	subprog = find_subprog(env, target_insn);
@@ -11187,6 +11194,8 @@ static bool loop_flag_is_zero(struct bpf_verifier_env *env)
 static void update_loop_inline_state(struct bpf_verifier_env *env, u32 subprogno)
 {
 	struct bpf_loop_inline_state *state = &cur_aux(env)->loop_inline_state;
+	verbose(env, "   update_loop_inline_state with subprog %d. initialized: %d. current subprog: %d\n",
+		subprogno, state->initialized, state->callback_subprogno);
 
 	if (!state->initialized) {
 		state->initialized = 1;
@@ -11200,6 +11209,9 @@ static void update_loop_inline_state(struct bpf_verifier_env *env, u32 subprogno
 
 	state->fit_for_inline = (loop_flag_is_zero(env) &&
 				 state->callback_subprogno == subprogno);
+	if (!state->fit_for_inline) {
+		verbose(env, "   bpf_loop() call no longer fit for inlining\n");
+	}
 }
 
 /* Returns whether or not the given map type can potentially elide
@@ -11438,12 +11450,14 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		err = mark_chain_precision(env, BPF_REG_1);
 		if (err)
 			return err;
+		verbose(env, "   max iterations: %d. callback_depth: %d\n",
+			regs[BPF_REG_1].umax_value, cur_func(env)->callback_depth);
 		if (cur_func(env)->callback_depth < regs[BPF_REG_1].umax_value) {
 			err = push_callback_call(env, insn, insn_idx, meta.subprogno,
 						 set_loop_callback_state);
 		} else {
 			cur_func(env)->callback_depth = 0;
-			if (env->log.level & BPF_LOG_LEVEL2)
+			// !!! if (env->log.level & BPF_LOG_LEVEL2)
 				verbose(env, "frame%d bpf_loop iteration limit reached\n",
 					env->cur_state->curframe);
 		}
@@ -14167,8 +14181,8 @@ static void sanitize_mark_insn_seen(struct bpf_verifier_env *env)
 	struct bpf_verifier_state *vstate = env->cur_state;
 
 	// if (!env->insn_aux_data[env->insn_idx].seen) {
-		verbose(env, "!!! marking instruction %d seen. speculative: %d\n",
-			env->insn_idx, vstate->speculative);
+		// verbose(env, "!!! marking instruction %d seen. speculative: %d\n",
+		// 	env->insn_idx, vstate->speculative);
 	// }
 
 	/* If we simulate paths under speculation, we don't update the
@@ -16688,6 +16702,8 @@ static int check_ld_imm(struct bpf_verifier_env *env, struct bpf_insn *insn)
 
 		dst_reg->type = PTR_TO_FUNC;
 		dst_reg->subprogno = subprogno;
+		verbose(env, "!!! check_ld_imm: pseudo func resolved as subprog: %d (%s) for target instruction: %d\n", 
+			subprogno,subprog_name(env, subprogno), env->insn_idx + insn->imm + 1);
 		return 0;
 	}
 
@@ -17715,6 +17731,7 @@ static int check_btf_func_early(struct bpf_verifier_env *env,
 			return -EINVAL;
 		return 0;
 	}
+	verbose(env, "!!! check_btf_func_early: nfuncs = %u\n", nfuncs);
 
 	urec_size = attr->func_info_rec_size;
 	if (urec_size < MIN_BPF_FUNCINFO_SIZE ||
@@ -17846,6 +17863,7 @@ static int check_btf_func(struct bpf_verifier_env *env,
 		/* Already checked type_id */
 		type = btf_type_by_id(btf, krecord[i].type_id);
 		info_aux[i].linkage = BTF_INFO_VLEN(type->info);
+		verbose(env, "!!! func_info[%d].linkage = %d\n", i, info_aux[i].linkage);
 		/* Already checked func_proto */
 		func_proto = btf_type_by_id(btf, type->type);
 
@@ -19404,6 +19422,7 @@ static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type typ
 static int do_check(struct bpf_verifier_env *env)
 {
 	bool pop_log = !(env->log.level & BPF_LOG_LEVEL2);
+	pop_log = false;  // !!!
 	struct bpf_verifier_state *state = env->cur_state;
 	struct bpf_insn *insns = env->prog->insnsi;
 	struct bpf_reg_state *regs;
@@ -19697,6 +19716,7 @@ process_bpf_exit:
 					return err;
 
 				env->insn_idx++;
+				verbose(env, "!!! do_check: LD IMM marking next insn seen: %d\n", env->insn_idx);
 				sanitize_mark_insn_seen(env);
 			} else {
 				verbose(env, "invalid BPF_LD mode\n");
@@ -20422,6 +20442,8 @@ static int adjust_subprog_starts_after_remove(struct bpf_verifier_env *env,
 		memmove(env->subprog_info + i,
 			env->subprog_info + j,
 			sizeof(*env->subprog_info) * move);
+		verbose(env, "!!! adjust_subprog_starts_after_remove: %d -> %d\n",
+			env->subprog_cnt, env->subprog_cnt - (j - i));
 		env->subprog_cnt -= j - i;
 
 		/* remove func_info */
@@ -20627,14 +20649,14 @@ static int opt_remove_dead_code(struct bpf_verifier_env *env)
 		if (!j)
 			continue;
 
-		// !!!
-		if (!(j == 2)) {
-			continue;
-		}
-		if (first) {
-			first = 0;
-			continue;
-		}
+		// // !!!
+		// if (!(j == 2)) {
+		// 	continue;
+		// }
+		// if (first) {
+		// 	first = 0;
+		// 	continue;
+		// }
 		err = verifier_remove_insns(env, i, j);
 		if (err)
 			return err;
@@ -22598,6 +22620,8 @@ static struct bpf_prog *inline_bpf_loop(struct bpf_verifier_env *env,
 
 	/* callback start is known only after patching */
 	callback_start = env->subprog_info[callback_subprogno].start;
+	verbose(env, "!!! inline bpf_loop inserting inlined function at position %d for %d instructions. callback subprog no: %d, callback start: %d\n", 
+		position, cnt, callback_subprogno, callback_start);
 	/* Note: insn_buf[12] is an offset of BPF_CALL_REL instruction */
 	call_insn_offset = position + 12;
 	callback_offset = callback_start - call_insn_offset - 1;
@@ -22651,6 +22675,10 @@ static int optimize_bpf_loop(struct bpf_verifier_env *env)
 			delta     += cnt - 1;
 			env->prog  = new_prog;
 			insn       = new_prog->insnsi + i + delta;
+		} else if (is_bpf_loop_call(insn)) {
+			// !!!
+			verbose(env, "!!! bpf_loop call not inlined. insn: %d. callback subprogno: %d\n",
+				i, inline_state->callback_subprogno);
 		}
 
 		if (subprogs[cur_subprog + 1].start == i + delta + 1) {
@@ -24031,6 +24059,25 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	if (ret)
 		goto err_unlock;
 
+	verbose(env, "!!! program at start !!!\n");
+	struct bpf_insn *insn;
+	int j;
+	for (j = 0, insn = env->prog->insnsi; j < env->prog->len; j++, insn++) {
+		verbose_linfo(env, j, "; ");
+		env->prev_log_pos = env->log.end_pos;
+		u32 seen  = env->insn_aux_data[j].seen;
+		verbose(env, "%d (seen: %d): ", j, seen);
+		verbose_insn(env, insn);
+		if (bpf_pseudo_func(insn)) {
+			verbose(env, " pseudo-func calling: %d (imm: %d)\n", j + insn->imm + 1, insn->imm);
+		}
+		if (is_bpf_loop_call(insn)) {
+			verbose(env, " bpf_loop() call\n");
+		}
+		env->prev_insn_print_pos = env->log.end_pos - env->prev_log_pos;
+		env->prev_log_pos = env->log.end_pos;
+	}
+
 	ret = process_fd_array(env, attr, uattr);
 	if (ret)
 		goto skip_full_check;
@@ -24109,7 +24156,9 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 
 	verbose(env, "!!! before do_check_main, 6 seen: %d\n: ",env->insn_aux_data[6].seen);
 	ret = do_check_main(env);
+	verbose(env, "!!! after do_check_main, 6 seen: %d\n: ",env->insn_aux_data[6].seen);
 	ret = ret ?: do_check_subprogs(env);
+	verbose(env, "!!! after do_check_subprogs, 6 seen: %d\n: ",env->insn_aux_data[6].seen);
 
 	if (ret == 0 && bpf_prog_is_offloaded(env->prog->aux))
 		ret = bpf_prog_offload_finalize(env);
@@ -24126,21 +24175,55 @@ skip_full_check:
 	if (ret == 0)
 		ret = check_max_stack_depth(env);
 
-	/* instruction rewrites happen after this point */
-	
-	verbose(env, "!!! before optimize_bpf_loop, 6 seen: %d\n: ",env->insn_aux_data[6].seen);
-	if (ret == 0)
-		ret = optimize_bpf_loop(env);
-
 	verbose(env, "!!! program before optimizations !!!\n");
-	struct bpf_insn *insn;
-	int j;
+	// struct bpf_insn *insn;
+	// int j;
 	for (j = 0, insn = env->prog->insnsi; j < env->prog->len; j++, insn++) {
 		verbose_linfo(env, j, "; ");
 		env->prev_log_pos = env->log.end_pos;
 		u32 seen  = env->insn_aux_data[j].seen;
 		verbose(env, "%d (seen: %d): ", j, seen);
 		verbose_insn(env, insn);
+		if (bpf_pseudo_func(insn)) {
+			verbose(env, " pseudo-func calling: %d (imm: %d)\n", j + insn->imm + 1, insn->imm);
+		}
+		if (is_bpf_loop_call(insn)) {
+			verbose(env, " bpf_loop() call\n");
+		}
+		env->prev_insn_print_pos = env->log.end_pos - env->prev_log_pos;
+		env->prev_log_pos = env->log.end_pos;
+	}
+
+	/* instruction rewrites happen after this point */
+	
+	if (ret == 0)
+		ret = optimize_bpf_loop(env);
+
+	if (ret != 0) {
+		verbose(env, "!!! bpf_loop() inlining failed !!!\n");
+	}
+
+	verbose(env, "!!! subprograms after bpf_loop inlining:\n");
+	for (i = 0; i < env->subprog_cnt; i++) {
+		const char *sub_name = subprog_name(env, i);
+		u32 start = env->subprog_info[i].start;
+		u32 seen  = env->insn_aux_data[start].seen;
+		verbose(env, "func#%d @%d (%s): start seen: %d\n", i, start, sub_name, seen);
+	}
+
+	verbose(env, "!!! program after bpf_loop inlining !!!\n");
+	for (j = 0, insn = env->prog->insnsi; j < env->prog->len; j++, insn++) {
+		verbose_linfo(env, j, "; ");
+		env->prev_log_pos = env->log.end_pos;
+		u32 seen  = env->insn_aux_data[j].seen;
+		verbose(env, "%d (seen: %d): ", j, seen);
+		verbose_insn(env, insn);
+		if (bpf_pseudo_func(insn)) {
+			verbose(env, " pseudo-func calling: %d (imm: %d)\n", j + insn->imm + 1, insn->imm);
+		}
+		if (is_bpf_loop_call(insn)) {
+			verbose(env, " bpf_loop() call\n");
+		}
 		env->prev_insn_print_pos = env->log.end_pos - env->prev_log_pos;
 		env->prev_log_pos = env->log.end_pos;
 	}
